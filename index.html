@@ -321,7 +321,10 @@
         function getMWMax(props) {
             const raw = props.MW_máximo;
             if (raw === undefined || raw === null || String(raw).trim() === '') return 0;
-            const n = parseFloat(String(raw).replace(',', '.'));
+            // Extrae el primer número decimal del string (p. ej. "30–45 MW" -> 30; "~80 MW" -> 80)
+            const m = String(raw).replace(',', '.').match(/(\d+(?:\.\d+)?)/);
+            if (!m) return 0;
+            const n = parseFloat(m[1]);
             return isNaN(n) ? 0 : n;
         }
 
@@ -384,6 +387,24 @@
             `;
         }
 
+        // 🔧 FIX: parsea "lat, lon" del campo properties.Coordenada
+        // y valida rango geográfico de Chile. Devuelve {lat, lon} o null.
+        function parseCoordenadaString(str) {
+            if (str === undefined || str === null) return null;
+            const s = String(str).trim();
+            if (s === '' || s === 'NO INFORMA') return null;
+            const parts = s.split(',').map(x => parseFloat(x.trim()));
+            if (parts.length !== 2 || isNaN(parts[0]) || isNaN(parts[1])) return null;
+            let [lat, lon] = parts;
+            // Corrección de signos obvios
+            if (lat > 0) lat = -Math.abs(lat);
+            if (lon > 0) lon = -Math.abs(lon);
+            // Validar rango Chile (continental + islas)
+            if (lat < -56 || lat > -17) return null;
+            if (lon < -110 || lon > -66) return null;
+            return { lat, lon };
+        }
+
         // ================== INICIALIZACIÓN ==================
         document.addEventListener('DOMContentLoaded', function () {
             fetch('data/datacenter.json')
@@ -392,28 +413,53 @@
                     return res.json();
                 })
                 .then(data => {
-                    featuresData = (data.features || []).filter(f =>
-                        f.geometry &&
-                        f.geometry.type === 'Point' &&
-                        Array.isArray(f.geometry.coordinates) &&
-                        f.geometry.coordinates.length === 2 &&
-                        !isNaN(f.geometry.coordinates[0]) &&
-                        !isNaN(f.geometry.coordinates[1])
-                    );
+                    let descartados = 0;
 
+                    featuresData = (data.features || [])
+                        .map(f => {
+                            const props = f.properties || {};
+
+                            // 1) Preferimos SIEMPRE properties.Coordenada (lat, lon en grados)
+                            let coord = parseCoordenadaString(props.Coordenada);
+
+                            // 2) Fallback: geometry.coordinates SOLO si está en rango válido (GeoJSON: [lon, lat])
+                            if (!coord && f.geometry && Array.isArray(f.geometry.coordinates) && f.geometry.coordinates.length === 2) {
+                                const [lon, lat] = f.geometry.coordinates;
+                                if (!isNaN(lon) && !isNaN(lat) &&
+                                    lat >= -56 && lat <= -17 &&
+                                    lon >= -110 && lon <= -66) {
+                                    coord = { lat, lon };
+                                }
+                            }
+
+                            if (!coord) {
+                                console.warn('⚠️ Descartado (sin coordenada válida):', props.Nombre_Dat || '(sin nombre)', '| Coordenada:', props.Coordenada);
+                                descartados++;
+                                return null;
+                            }
+
+                            return {
+                                type: 'Feature',
+                                geometry: { type: 'Point', coordinates: [coord.lon, coord.lat] },
+                                properties: props
+                            };
+                        })
+                        .filter(Boolean);
+
+                    // Normalizar textos
                     featuresData.forEach(f => {
                         f.properties.Propietari = normalizeText(f.properties.Propietari);
                         f.properties.Empresa_cl = normalizeText(f.properties.Empresa_cl);
                     });
 
-                    console.log(`✅ ${featuresData.length} data centers cargados`);
+                    console.log(`✅ ${featuresData.length} data centers cargados | 🗑️ ${descartados} descartados`);
                     initApp();
                 })
                 .catch(err => {
                     console.error('Error cargando datos:', err);
                     document.getElementById('mapCount').textContent = 'Error al cargar datos';
                     document.getElementById('companyList').innerHTML =
-                        '<div class="text-xs text-red-500 text-center py-4">Error al cargar data/datacenter.json</div>';
+                        '<div class="text-xs text-red-500 text-center py-4">Error al cargar data/datacenter.json<br><span class="text-[10px]">Abre con un servidor local (python -m http.server 8000), no con file://</span></div>';
                 });
         });
 
@@ -508,7 +554,7 @@
             });
 
             featuresData.forEach((feature) => {
-                const coords = feature.geometry.coordinates;
+                const coords = feature.geometry.coordinates; // [lon, lat]
                 const props = feature.properties;
 
                 const { className, size } = getMarkerStyle(props);
